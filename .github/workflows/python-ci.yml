@@ -1,0 +1,112 @@
+name: Python CI
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        description: Python version to use
+        type: string
+        default: "3.12"
+      working-directory:
+        description: Directory containing the Python project
+        type: string
+        default: "."
+      enable-security-scan:
+        description: Run Bandit security scanner
+        type: boolean
+        default: false
+      lint-tool:
+        description: Linter to use (ruff, flake8, or py_compile)
+        type: string
+        default: "ruff"
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: pip
+          cache-dependency-path: ${{ inputs.working-directory }}/requirements*.txt
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          if [ "${{ inputs.lint-tool }}" = "ruff" ]; then
+            pip install ruff
+          elif [ "${{ inputs.lint-tool }}" = "flake8" ]; then
+            pip install flake8
+          fi
+
+      - name: Lint (ruff)
+        if: inputs.lint-tool == 'ruff'
+        run: ruff check .
+
+      - name: Lint (flake8)
+        if: inputs.lint-tool == 'flake8'
+        run: flake8 .
+
+      - name: Lint (py_compile)
+        if: inputs.lint-tool == 'py_compile'
+        run: python -m py_compile $(find . -name '*.py' -not -path './.venv/*')
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: pip
+          cache-dependency-path: ${{ inputs.working-directory }}/requirements*.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: pytest tests/ -v --tb=short --junitxml=test-results.xml
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: ${{ inputs.working-directory }}/test-results.xml
+
+  security-scan:
+    name: Security Scan
+    if: inputs.enable-security-scan
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install Bandit
+        run: pip install bandit
+
+      - name: Run Bandit
+        run: bandit -r . -x ./tests -f json -o bandit-report.json || true
+
+      - name: Upload security report
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-report
+          path: ${{ inputs.working-directory }}/bandit-report.json
