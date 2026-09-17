@@ -127,11 +127,12 @@ jobs:
           fi
 
   playwright:
-    name: E2E Tests
+    name: E2E Tests (Shard ${{ matrix.shard }})
     if: inputs.enable-playwright
     needs: build
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         shard: [1/3, 2/3, 3/3]
     defaults:
@@ -155,17 +156,62 @@ jobs:
           fi
 
       - name: Install Playwright browsers
-        run: npx playwright install --with-deps
+        run: npx playwright install --with-deps chromium
 
       - name: Run Playwright
-        run: npx playwright test --shard=${{ matrix.shard }}
+        run: npx playwright test --shard=${{ matrix.shard }} --reporter=blob
+        env:
+          CI: "true"
 
-      - name: Upload report
+      - name: Upload blob report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-report-${{ strategy.job-index }}
+          name: blob-report-${{ strategy.job-index }}
+          path: ${{ inputs.working-directory }}/blob-report/
+          retention-days: 1
+
+  playwright-merge:
+    name: Merge E2E Reports
+    if: inputs.enable-playwright && always()
+    needs: playwright
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ inputs.package-manager }}
+
+      - name: Install dependencies
+        run: |
+          if [ "${{ inputs.package-manager }}" = "pnpm" ]; then
+            corepack enable pnpm
+            pnpm install --frozen-lockfile
+          else
+            npm ci
+          fi
+
+      - name: Download all blob reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: blob-report-*
+          path: ${{ inputs.working-directory }}/all-blob-reports
+          merge-multiple: true
+
+      - name: Merge reports
+        run: npx playwright merge-reports --reporter html ./all-blob-reports
+
+      - name: Upload merged HTML report
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
           path: ${{ inputs.working-directory }}/playwright-report/
+          retention-days: 14
 
   security-scan:
     name: Security Scan
