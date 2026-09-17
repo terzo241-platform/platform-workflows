@@ -1,0 +1,95 @@
+name: Deploy to Cloud Run
+
+on:
+  workflow_call:
+    inputs:
+      service-name:
+        description: Cloud Run service name
+        type: string
+        required: true
+      image:
+        description: Full container image reference (registry/project/repo/image:tag)
+        type: string
+        required: true
+      region:
+        description: GCP region
+        type: string
+        default: "asia-south1"
+      wif-provider:
+        description: Workload Identity Federation provider
+        type: string
+        required: true
+      wif-service-account:
+        description: Service account email for WIF
+        type: string
+        required: true
+      min-instances:
+        description: Minimum instances (0 for scale-to-zero)
+        type: number
+        default: 0
+      max-instances:
+        description: Maximum instances
+        type: number
+        default: 10
+      cpu:
+        description: CPU allocation (e.g., "1", "2")
+        type: string
+        default: "1"
+      memory:
+        description: Memory allocation (e.g., "512Mi", "1Gi")
+        type: string
+        default: "512Mi"
+      concurrency:
+        description: Max concurrent requests per instance
+        type: number
+        default: 80
+      port:
+        description: Container port
+        type: number
+        default: 3000
+      env-vars:
+        description: "Environment variables (KEY=VALUE,KEY2=VALUE2)"
+        type: string
+        default: ""
+      allow-unauthenticated:
+        description: Allow unauthenticated access
+        type: boolean
+        default: false
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ inputs.wif-provider }}
+          service_account: ${{ inputs.wif-service-account }}
+
+      - name: Deploy to Cloud Run
+        id: deploy
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: ${{ inputs.service-name }}
+          image: ${{ inputs.image }}
+          region: ${{ inputs.region }}
+          flags: >-
+            --min-instances=${{ inputs.min-instances }}
+            --max-instances=${{ inputs.max-instances }}
+            --cpu=${{ inputs.cpu }}
+            --memory=${{ inputs.memory }}
+            --concurrency=${{ inputs.concurrency }}
+            --port=${{ inputs.port }}
+            ${{ inputs.env-vars != '' && format('--set-env-vars={0}', inputs.env-vars) || '' }}
+            ${{ inputs.allow-unauthenticated && '--allow-unauthenticated' || '' }}
+
+      - name: Deployment summary
+        run: |
+          echo "### Deployment Complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Service**: ${{ inputs.service-name }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Region**: ${{ inputs.region }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Image**: \`${{ inputs.image }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **URL**: ${{ steps.deploy.outputs.url }}" >> "$GITHUB_STEP_SUMMARY"
