@@ -68,9 +68,11 @@ runs:
         category: "trivy"
 
     # --- gitleaks: secret detection ---
+    # Requires GITLEAKS_LICENSE org secret for org repos (free at gitleaks.io)
     - name: Run gitleaks secret detection
       id: gitleaks
       if: inputs.enable-gitleaks == 'true'
+      continue-on-error: true
       uses: gitleaks/gitleaks-action@v3
       env:
         GITLEAKS_LICENSE: ${{ env.GITLEAKS_LICENSE || '' }}
