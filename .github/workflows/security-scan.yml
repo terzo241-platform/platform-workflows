@@ -1,0 +1,120 @@
+name: Security Scan
+
+on:
+  workflow_call:
+    inputs:
+      language:
+        description: "Primary language for CodeQL (python, javascript, java, go, ruby, csharp, cpp)"
+        type: string
+        default: ""
+      enable-codeql:
+        description: Enable CodeQL SAST analysis
+        type: boolean
+        default: true
+      enable-trivy:
+        description: Enable Trivy dependency/vulnerability scanning
+        type: boolean
+        default: true
+      enable-gitleaks:
+        description: Enable gitleaks secret detection
+        type: boolean
+        default: true
+      enable-dependency-review:
+        description: Enable dependency review on PRs (blocks vulnerable new deps)
+        type: boolean
+        default: true
+      enable-sbom:
+        description: Generate CycloneDX SBOM artifact
+        type: boolean
+        default: false
+      trivy-severity:
+        description: Minimum Trivy severity (UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL)
+        type: string
+        default: "HIGH,CRITICAL"
+      fail-on-findings:
+        description: Fail the workflow if vulnerabilities are found
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  codeql:
+    name: CodeQL SAST
+    if: inputs.enable-codeql
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect language
+        id: detect
+        run: |
+          if [ -n "${{ inputs.language }}" ]; then
+            echo "language=${{ inputs.language }}" >> "$GITHUB_OUTPUT"
+          elif ls *.py **/*.py 2>/dev/null | head -1 > /dev/null 2>&1; then
+            echo "language=python" >> "$GITHUB_OUTPUT"
+          elif ls package.json 2>/dev/null > /dev/null; then
+            echo "language=javascript" >> "$GITHUB_OUTPUT"
+          elif ls pom.xml build.gradle 2>/dev/null | head -1 > /dev/null 2>&1; then
+            echo "language=java" >> "$GITHUB_OUTPUT"
+          else
+            echo "language=python" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ steps.detect.outputs.language }}
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v4
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ steps.detect.outputs.language }}"
+
+  dependency-review:
+    name: Dependency Review
+    if: inputs.enable-dependency-review && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v5
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: always
+
+  dependency-scan:
+    name: Dependency & Secret Scan
+    if: inputs.enable-trivy || inputs.enable-gitleaks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Security scan
+        uses: terzo241-platform/platform-workflows/.github/actions/security-scan@main
+        with:
+          scan-type: "fs"
+          severity: ${{ inputs.trivy-severity }}
+          enable-gitleaks: ${{ inputs.enable-gitleaks && 'true' || 'false' }}
+          enable-sbom: ${{ inputs.enable-sbom && 'true' || 'false' }}
+          fail-on-findings: ${{ inputs.fail-on-findings && 'true' || 'false' }}
+          upload-sarif: "true"

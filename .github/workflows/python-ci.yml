@@ -86,14 +86,19 @@ jobs:
           path: ${{ inputs.working-directory }}/test-results.xml
 
   security-scan:
-    name: Security Scan
+    name: Security Scan (Bandit + Trivy + gitleaks)
     if: inputs.enable-security-scan
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
     defaults:
       run:
         working-directory: ${{ inputs.working-directory }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -102,11 +107,19 @@ jobs:
       - name: Install Bandit
         run: pip install bandit
 
-      - name: Run Bandit
+      - name: Run Bandit (Python-specific SAST)
         run: bandit -r . -x ./tests -f json -o bandit-report.json || true
 
-      - name: Upload security report
+      - name: Upload Bandit report
         uses: actions/upload-artifact@v4
         with:
-          name: security-report
+          name: security-report-bandit
           path: ${{ inputs.working-directory }}/bandit-report.json
+
+      - name: Trivy + gitleaks (platform security scan)
+        uses: terzo241-platform/platform-workflows/.github/actions/security-scan@main
+        with:
+          scan-type: "fs"
+          severity: "HIGH,CRITICAL"
+          enable-gitleaks: "true"
+          fail-on-findings: "true"

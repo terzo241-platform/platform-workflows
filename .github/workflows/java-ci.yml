@@ -117,3 +117,23 @@ jobs:
           path: |
             ${{ inputs.working-directory }}/target/dependency-check-report.html
             ${{ inputs.working-directory }}/build/reports/dependency-check-report.html
+
+  platform-security-scan:
+    name: Platform Security Scan
+    if: inputs.enable-security-scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Trivy + gitleaks
+        uses: terzo241-platform/platform-workflows/.github/actions/security-scan@main
+        with:
+          scan-type: "fs"
+          severity: "HIGH,CRITICAL"
+          enable-gitleaks: "true"
+          fail-on-findings: "true"

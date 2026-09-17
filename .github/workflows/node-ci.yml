@@ -166,3 +166,22 @@ jobs:
         with:
           name: playwright-report-${{ strategy.job-index }}
           path: ${{ inputs.working-directory }}/playwright-report/
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Platform security scan (Trivy + gitleaks)
+        uses: terzo241-platform/platform-workflows/.github/actions/security-scan@main
+        with:
+          scan-type: "fs"
+          severity: "HIGH,CRITICAL"
+          enable-gitleaks: "true"
+          fail-on-findings: "true"

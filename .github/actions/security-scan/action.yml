@@ -1,0 +1,102 @@
+name: Security Scan
+description: >
+  Enterprise composite action: Trivy vulnerability scanning (v0.36.0),
+  gitleaks secret detection (v3), dependency review, optional SBOM generation.
+
+inputs:
+  scan-type:
+    description: "Trivy scan type: fs (filesystem/dependencies) or repo (full repo scan)"
+    default: "fs"
+  severity:
+    description: Minimum severity to report (UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL)
+    default: "HIGH,CRITICAL"
+  trivyignore:
+    description: Path to .trivyignore file for suppressing known issues
+    default: ""
+  enable-gitleaks:
+    description: Enable gitleaks secret detection
+    default: "true"
+  enable-sbom:
+    description: Generate CycloneDX SBOM artifact
+    default: "false"
+  fail-on-findings:
+    description: Fail the action if vulnerabilities are found
+    default: "true"
+  upload-sarif:
+    description: Upload results as SARIF to GitHub Security tab
+    default: "true"
+
+outputs:
+  trivy-exit-code:
+    description: Exit code from Trivy scan (0 = clean, 1 = findings)
+    value: ${{ steps.trivy.outputs.exit-code }}
+  gitleaks-exit-code:
+    description: Exit code from gitleaks scan (0 = clean, 1 = findings)
+    value: ${{ steps.gitleaks.outputs.exit-code }}
+
+runs:
+  using: composite
+  steps:
+    # --- Trivy: dependency + filesystem vulnerability scanning ---
+    - name: Run Trivy vulnerability scanner
+      id: trivy
+      uses: aquasecurity/trivy-action@v0.36.0
+      with:
+        scan-type: ${{ inputs.scan-type }}
+        scan-ref: "."
+        severity: ${{ inputs.severity }}
+        format: "table"
+        exit-code: ${{ inputs.fail-on-findings == 'true' && '1' || '0' }}
+        trivyignores: ${{ inputs.trivyignore }}
+
+    - name: Run Trivy (SARIF output)
+      if: inputs.upload-sarif == 'true' && always()
+      uses: aquasecurity/trivy-action@v0.36.0
+      with:
+        scan-type: ${{ inputs.scan-type }}
+        scan-ref: "."
+        severity: ${{ inputs.severity }}
+        format: "sarif"
+        output: "trivy-results.sarif"
+        exit-code: "0"
+
+    - name: Upload Trivy SARIF
+      if: inputs.upload-sarif == 'true' && always()
+      uses: github/codeql-action/upload-sarif@v4
+      with:
+        sarif_file: "trivy-results.sarif"
+        category: "trivy"
+
+    # --- gitleaks: secret detection ---
+    - name: Run gitleaks secret detection
+      id: gitleaks
+      if: inputs.enable-gitleaks == 'true'
+      uses: gitleaks/gitleaks-action@v3
+      env:
+        GITLEAKS_LICENSE: ${{ env.GITLEAKS_LICENSE || '' }}
+
+    - name: Upload gitleaks report
+      if: inputs.enable-gitleaks == 'true' && always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: gitleaks-report
+        path: gitleaks-report.*
+        if-no-files-found: ignore
+
+    # --- SBOM: CycloneDX generation (opt-in) ---
+    - name: Generate SBOM (CycloneDX)
+      if: inputs.enable-sbom == 'true'
+      uses: aquasecurity/trivy-action@v0.36.0
+      with:
+        scan-type: "fs"
+        scan-ref: "."
+        format: "cyclonedx"
+        output: "sbom.cdx.json"
+        exit-code: "0"
+
+    - name: Upload SBOM artifact
+      if: inputs.enable-sbom == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: sbom-cyclonedx
+        path: sbom.cdx.json
