@@ -1,6 +1,6 @@
 # Ford Platform Engineering — Adoption & Migration Strategy
 
-**Version:** 1.0 | **Date:** September 2026 | **Classification:** Internal — Platform Team  
+**Version:** 1.1 | **Date:** September 2026 | **Classification:** Internal — Platform Team  
 **Author:** Platform Architecture Team | **Status:** Draft for Leadership Review
 
 ---
@@ -160,6 +160,7 @@ This cost is invisible — no single team feels it, but the organization pays it
 │   ┌────────────────────────────────────────────────────────┐        │
 │   │              PLATFORM AGENT (MCP Server)               │        │
 │   │                                                        │        │
+│   │  WHAT THE AGENT ABSTRACTS: DECISIONS (not tools)       │        │
 │   │  ┌─────────────────────────────────────────────────┐   │        │
 │   │  │  FORD STANDARDS ENGINE                          │   │        │
 │   │  │  ├── Naming conventions (org/repo/service)      │   │        │
@@ -189,7 +190,14 @@ This cost is invisible — no single team feels it, but the organization pays it
 │   │  GitHub     │ │  GCP     │ │ Terraform│ │  BigQuery   │       │
 │   │  Actions    │ │  APIs    │ │  Cloud   │ │  Metrics    │       │
 │   │  API        │ │          │ │          │ │             │       │
-│   └─────────────┘ └──────────┘ └──────────┘ └─────────────┘       │
+│   └──────┬──────┘ └──────────┘ └──────────┘ └─────────────┘       │
+│          │                                                          │
+│   CI/CD EXECUTION LAYER (3-Tier Resilience)                         │
+│   ┌──────▼────────────────────────────────────────────────────┐     │
+│   │ Tier 1: GHA Hosted Runners ──── normal operations         │     │
+│   │ Tier 2: Self-Hosted Runners on GKE ── GHA down / airgap  │     │
+│   │ Tier 3: Tekton (critical paths) ── total GitHub outage    │     │
+│   └───────────────────────────────────────────────────────────┘     │
 │                                                                     │
 │   INFRASTRUCTURE LAYER                                              │
 │   ┌──────────────────────────────────────────────────────────┐      │
@@ -199,6 +207,100 @@ This cost is invisible — no single team feels it, but the organization pays it
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
 ```
+
+### 3.1.1 Critical Design Principle: Standardize Decisions, Not Tools
+
+The agent abstracts **decisions** (how to build, test, secure, deploy) — not
+CI/CD tools. This is the Spotify model (2026 industry consensus):
+
+```
+WRONG (sounds good, fails in practice):     RIGHT (what Spotify/Google/Netflix do):
+──────────────────────────────────          ──────────────────────────────────────
+Agent abstracts over tools                  Agent abstracts over decisions
+"Deploy" → if GHA, do X;                   "Deploy" → check Ford standards:
+           if Tekton, do Y;                   ✓ Security scan passed?
+           if Jenkins, do Z                   ✓ Team label applied?
+                                              ✓ dev → staging → prod path?
+Platform team maintains 3 toolchains        Then execute via golden path tool (GHA)
+Agent needs adapters for 3 APIs
+Debugging goes through 3 layers             Platform team maintains 1 toolchain
+                                            Agent speaks 1 API
+Cost: 3× engineering effort                 Agent works best with golden path
+Result: abstraction layer IS the bug        Teams on other tools get visibility,
+                                              not automation
+```
+
+**Why not abstract the tools?** Industry data (2026):
+- No enterprise has successfully shipped "one agent, many CI/CD backends"
+- Backstage (the leading IDP) has plugins for Jenkins, Tekton, GHA — but
+  for **UI aggregation only**, not orchestration. Teams still pick one tool.
+- The cost of maintaining adapters for 3 CI/CD APIs exceeds the cost of
+  gradual migration to one
+- CircleCI MCP, GitHub Agentic Workflows, Azure SRE Agent — all work
+  WITHIN a single CI/CD system, not across multiple
+
+**The practical approach for Ford:**
+
+| CI/CD Tool | Status | Agent Support | Platform Investment |
+|---|---|---|---|
+| **GitHub Actions** | Golden path (new projects) | Full: scaffold, deploy, scan, metrics, migrate | 100% — reusable workflows, modules, docs |
+| **Tekton** | Supported (existing projects) | Partial: trigger pipeline, read status | 20% — Backstage dashboard, basic API |
+| **Jenkins** | Sunset (12-month plan) | Migration only: `migrate_from_jenkins(repo)` | 0% — GHA Importer handles conversion |
+
+Teams keep their existing tools. But the agent, the reusable workflows, the
+Terraform modules, the security scanning, the DORA metrics — all of that
+only works fully on the golden path. The golden path wins not by mandate,
+but by being **so much better** that teams choose to migrate.
+
+### 3.1.2 CI/CD Resilience: GitHub Is Not Infallible
+
+GitHub Actions reliability data (May 2025 – April 2026):
+- **57 GitHub Actions outages** in 12 months (~1 per week)
+- **112 hours cumulative downtime** from major incidents
+- **MTTR: 6 hours 7 minutes** average
+- **SLA: 99.9% contractual** vs **90.21–99.33% actual**
+- Feb 2026: 37 incidents in one month (worst on record)
+
+**For Ford with 80+ teams, a single 6-hour GHA outage blocks every team
+from shipping.** This is not theoretical — it's weekly reality.
+
+**3-Tier Resilience Model:**
+
+```
+TIER 1: GHA Hosted Runners (default)
+  ├── Normal operations, 90% of workloads
+  ├── Same YAML workflows teams already write
+  ├── GitHub manages infrastructure
+  └── Cost: included in GHEC license
+
+TIER 2: Self-Hosted Runners on GKE (failover + air-gapped)
+  ├── Same GHA workflow YAML — just change: runs-on: self-hosted
+  ├── Pods in Ford's GKE cluster (same pattern as Atlantis)
+  ├── Activates when: GHA hosted is down, OR air-gapped requirement
+  ├── Actions Runner Controller (ARC) auto-scales pods per job
+  └── Cost: ~$200-400/month GKE node pool
+
+TIER 3: Tekton (critical path insurance)
+  ├── Payments, auth, core banking — services that CANNOT wait
+  ├── Already running at Ford — no new investment needed
+  ├── Agent can trigger + read status (basic integration)
+  ├── Does NOT get platform workflow investment (golden path only)
+  └── Cost: already budgeted (existing infrastructure)
+```
+
+**Why Tier 2 is the smart play:** Self-hosted runners run the EXACT same
+GHA workflow YAML as Tier 1. No code changes. Just a label swap:
+
+```yaml
+# Normal (Tier 1):
+runs-on: ubuntu-latest
+
+# Failover (Tier 2):
+runs-on: self-hosted    # runs on YOUR GKE pod, same workflow
+```
+
+This gives you GHA's developer experience with Atlantis-grade resilience
+(containers in your cluster, air-gapped, under your control).
 
 ### 3.2 Agent Conversations — Real Examples
 
@@ -628,9 +730,11 @@ TOTAL: 4-5 days                              │
 | Approach | Detail |
 |---|---|
 | **Don't say** | "Tekton is dead, move to GHA" |
-| **Do say** | "Tekton is solid for K8s-native workloads. The platform supports both. Here's where each shines." |
-| **Strategy** | GHA as the golden path for new projects. Existing Tekton migrates when teams choose. |
-| **Long game** | As more teams use GHA, Tekton becomes the exception. Eventually migrates naturally. |
+| **Do say** | "Tekton is solid and stays — as our Tier 3 resilience layer for critical paths. It's not being replaced; it's being *elevated* to infrastructure insurance." |
+| **Strategy** | GHA as the golden path (Tier 1). Self-hosted runners on GKE for failover (Tier 2). Tekton maintained for critical-path workloads that cannot tolerate any GitHub dependency (Tier 3). New projects start on GHA. |
+| **Tekton's new role** | Payments, auth, core banking pipelines that MUST deploy even during a total GitHub outage. Tekton runs on Ford's GKE — zero GitHub dependency. This is a *promotion*, not a sunset. |
+| **Agent integration** | Agent can trigger Tekton pipelines and read status (basic integration). Full automation (scaffold, scan, metrics) is golden-path-only (GHA). |
+| **Investment protection** | Existing Tekton expertise becomes DR expertise. Teams maintaining Tekton today are the ones who keep critical paths running when GitHub has its weekly outage. |
 
 #### Resistance 5: "Leadership should just mandate this"
 
@@ -857,13 +961,16 @@ MONTH     PHASE              KEY DELIVERABLES                           ADOPTION
                              Jenkins sunset date announced
                              Leadership mandate for remaining teams
 
- 10-11    SUNSET             75+ teams on platform                       90%
+ 10-11    SUNSET + HARDEN    75+ teams on platform                       90%
                              Jenkins decommission in progress
+                             Tekton maintained for Tier 3 critical paths
+                             Self-hosted runners (Tier 2) operational
                              Full DORA + SPACE reporting live
                              Agent as primary developer interface
 
  12       COMPLETE           80+ teams on platform                       95%+
                              Jenkins decommissioned
+                             3-tier CI/CD resilience validated (GHA → ARC → Tekton)
                              Annual ROI report: proven value
                              Platform NPS > +30
                              Roadmap for Year 2 presented
@@ -880,7 +987,8 @@ MONTH     PHASE              KEY DELIVERABLES                           ADOPTION
 | **Shadow IT** — teams build their own pipelines around the platform | Medium | High | Don't mandate. Make the platform genuinely better. If teams route around, listen — the platform is missing something. |
 | **Platform team becomes ticket queue** | High | High | Hire Product Manager. Protect engineering time. Weekly office hours instead of ticket-by-ticket support. |
 | **Key person dependency** — knowledge concentrated in 1-2 people | Medium | High | Document everything. Agent encodes tribal knowledge. Rotate on-call across team. |
-| **GCP / GitHub outage** — platform goes down, all teams affected | Low | Critical | Multi-region setup. Runbook for manual deploys during outage. DR tested quarterly. |
+| **GitHub Actions outage** — CI/CD blocked for all teams | **Medium** | Critical | **3-tier resilience:** Tier 1 (GHA hosted) → Tier 2 (self-hosted runners on GKE, same YAML) → Tier 3 (Tekton for critical paths). Data: 57 GHA outages in 12 months, 112 hrs cumulative downtime, 6h7m MTTR, actual uptime 90.21–99.33% vs 99.9% SLA. Self-hosted runners run identical workflow YAML — just `runs-on: self-hosted`. |
+| **GCP outage** — infrastructure unavailable | Low | Critical | Multi-region GKE. Terraform state in multi-region GCS. DR tested quarterly. Runbook for manual failover. |
 | **Budget cut mid-initiative** | Medium | Critical | Show ROI quarterly. Tie platform to business outcomes, not just engineering metrics. Build executive champion. |
 | **Agent produces incorrect guidance** | Medium | Medium | All agent actions create PRs (reviewable). Hard blocks for production-impacting changes. Human approval gates for destructive actions. |
 
@@ -905,7 +1013,20 @@ MONTH     PHASE              KEY DELIVERABLES                           ADOPTION
 | Gartner Platform Engineering | 80% of orgs will have platform teams by 2026 | gartner.com |
 | CNCF Maturity Model | 4-level framework for platform engineering maturity | tag-app-delivery.cncf.io |
 
-### 13.2 Automotive Industry Context
+### 13.2 GitHub Actions Reliability Data (2025-2026)
+
+| Data Point | Value | Source |
+|---|---|---|
+| GHA outages (May 2025 – Apr 2026) | 57 incidents (~1/week) | incidenthub.cloud |
+| Cumulative downtime | 112 hours | incidenthub.cloud |
+| Average MTTR | 6 hours 7 minutes | incidenthub.cloud |
+| Worst month | Feb 2026: 37 incidents | incidenthub.cloud |
+| SLA (contractual) | 99.9% | github.com/customer-terms |
+| Actual uptime range | 90.21%–99.33% | techtimes.com |
+| Self-hosted runner approach | ARC (Actions Runner Controller) on K8s | github.com/actions/actions-runner-controller |
+| Industry trend | CircleCI MCP, Azure SRE Agent, GitHub Agentic Workflows — all single-system, not cross-system | devhelm.io, byteiota.com |
+
+### 13.3 Automotive Industry Context
 
 | Data Point | Detail | Source |
 |---|---|---|
@@ -914,7 +1035,7 @@ MONTH     PHASE              KEY DELIVERABLES                           ADOPTION
 | Ford platform investment | Active hiring: Director-level platform engineering roles | careers.ford.com |
 | Industry pattern | DevOps as cost driver when tooling-only, not cultural | designnews.com |
 
-### 13.3 Platform Engineering Failure Modes
+### 13.4 Platform Engineering Failure Modes
 
 | Failure Mode | Frequency | Root Cause |
 |---|---|---|
@@ -931,6 +1052,7 @@ MONTH     PHASE              KEY DELIVERABLES                           ADOPTION
 | Version | Date | Author | Changes |
 |---|---|---|---|
 | 1.0 | 2026-09-17 | Platform Architecture Team | Initial draft |
+| 1.1 | 2026-09-18 | Platform Architecture Team | Added: 3-tier CI/CD resilience model (GHA → self-hosted → Tekton), standardize-decisions-not-tools principle (Spotify model), GitHub SPOF analysis (57 outages/yr data), updated risk register (Medium probability), Tekton elevated to Tier 3 critical path insurance |
 
 ---
 
