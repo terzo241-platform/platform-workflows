@@ -1,0 +1,130 @@
+name: Terraform CI (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      terraform_version:
+        description: "Terraform version"
+        type: string
+        default: "1.9.0"
+      working_directory:
+        description: "Path to Terraform root module"
+        type: string
+        required: true
+      environment:
+        description: "Environment name (dev, staging, prod)"
+        type: string
+        required: true
+      plan_only:
+        description: "Run plan only (true for PRs, false for apply)"
+        type: boolean
+        default: true
+      enable_cost_estimation:
+        description: "Enable Infracost cost estimation on PRs"
+        type: boolean
+        default: false
+    secrets:
+      wif_provider:
+        description: "GCP Workload Identity Federation provider"
+        required: false
+      tf_service_account:
+        description: "GCP service account for Terraform"
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+jobs:
+  terraform:
+    name: "${{ inputs.plan_only && 'Plan' || 'Apply' }} — ${{ inputs.environment }}"
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.plan_only && '' || inputs.environment }}
+    concurrency:
+      group: terraform-${{ inputs.environment }}-${{ inputs.working_directory }}
+      cancel-in-progress: ${{ inputs.plan_only }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+
+      - name: Authenticate to GCP
+        id: auth
+        if: secrets.wif_provider != ''
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.wif_provider }}
+          service_account: ${{ secrets.tf_service_account }}
+
+      - name: Terraform Format Check
+        working-directory: ${{ inputs.working_directory }}
+        run: terraform fmt -check -diff
+
+      - name: Terraform Init
+        id: init
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          if [ "${{ steps.auth.outcome }}" = "success" ]; then
+            terraform init
+          else
+            echo "::notice::GCP credentials not configured — init with -backend=false"
+            terraform init -backend=false
+          fi
+
+      - name: Terraform Validate
+        working-directory: ${{ inputs.working_directory }}
+        run: terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: ${{ inputs.working_directory }}
+        continue-on-error: true
+        run: |
+          PLAN_ARGS="-no-color -detailed-exitcode"
+          if [ "${{ steps.auth.outcome }}" = "success" ]; then
+            PLAN_ARGS="$PLAN_ARGS -out=tfplan"
+          fi
+          terraform plan $PLAN_ARGS 2>&1 | tee plan_output.txt
+          echo "exitcode=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Post Plan to PR
+        if: inputs.plan_only && github.event_name == 'pull_request'
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          body: |
+            ## Terraform Plan: `${{ inputs.environment }}` — `${{ inputs.working_directory }}` ${{ steps.plan.outcome == 'success' && '✅' || '❌' }}
+
+            <details>
+            <summary>Plan output (click to expand)</summary>
+
+            ```hcl
+            ${{ steps.plan.outputs.stdout }}
+            ```
+
+            </details>
+
+            | Step | Status |
+            |------|--------|
+            | Format | ${{ steps.init.outcome == 'success' && '✅' || '❌' }} |
+            | Init | ${{ steps.init.outcome == 'success' && '✅' || '❌' }} |
+            | Validate | ✅ |
+            | Plan | ${{ steps.plan.outcome == 'success' && '✅' || '❌' }} |
+
+            > Merge to `main` to apply. Changes deploy to **${{ inputs.environment }}**.
+
+      - name: Terraform Apply
+        if: ${{ !inputs.plan_only && steps.auth.outcome == 'success' }}
+        working-directory: ${{ inputs.working_directory }}
+        run: terraform apply -auto-approve -no-color tfplan
+
+      - name: Plan Status
+        if: inputs.plan_only && steps.plan.outcome == 'failure'
+        run: exit 1
